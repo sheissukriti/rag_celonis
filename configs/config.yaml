@@ -1,12 +1,28 @@
 
 app:
+  # LLM Configuration
   model: mistral
   embedding_model: sentence-transformers/all-MiniLM-L6-v2
-  top_k: 10
-  top_k_context: 5
-  use_reranker: false
-  use_reranker: true
+  
+  # Retrieval Configuration
+  retriever: faiss_tfidf  # Options: bm25, dense, faiss_tfidf
+  top_k: 10              # Number of documents to retrieve
+  top_k_context: 5       # Number of documents to use in prompt
+  use_reranker: true     # Enable TF-IDF reranking
+  
+  # File Paths
   index_path: store/faiss.index
   input_texts_path: store/input_texts.jsonl
   qa_texts_path: store/qa_texts_10k.jsonl
-  retriever: faiss_tfidf
+  
+  # Dataset Configuration
+  dataset_name: "MohammadOthman/mo-customer-support-tweets-945k"
+  max_documents: 10000   # Limit for development/testing
+  
+  # API Configuration
+  max_tokens: 512
+  temperature: 0.7
+  
+  # Logging Configuration
+  log_responses: true
+  log_file: "logs/responses.jsonl"
