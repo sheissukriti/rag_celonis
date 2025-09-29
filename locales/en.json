@@ -1,0 +1,21 @@
+{
+  "welcome_message": "Welcome to the Customer Support Assistant",
+  "ask_question": "Ask a question",
+  "generating_response": "Generating response...",
+  "no_results_found": "No relevant information found",
+  "error_occurred": "An error occurred while processing your request",
+  "language_detected": "Detected language: {language}",
+  "translation_available": "Translation available in your language",
+  "feedback_thanks": "Thank you for your feedback!",
+  "response_helpful": "Was this response helpful?",
+  "yes": "Yes",
+  "no": "No",
+  "submit_feedback": "Submit Feedback",
+  "conversation_history": "Conversation History",
+  "citations": "Citations",
+  "response_time": "Response Time: {time}s",
+  "language_support": "Language Support",
+  "auto_translate": "Auto-translate responses",
+  "original_language": "Original Language",
+  "translated_from": "Translated from {language}"
+}

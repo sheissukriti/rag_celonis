@@ -26,3 +26,86 @@ app:
   # Logging Configuration
   log_responses: true
   log_file: "logs/responses.jsonl"
+
+# Advanced Features Configuration
+advanced:
+  # Multi-turn Conversations
+  conversations:
+    enabled: true
+    storage_path: "store/conversations"
+    max_conversation_age_days: 30
+    max_turns_in_context: 3
+    max_context_length: 1000
+  
+  # Advanced Reranking
+  reranking:
+    enabled: true
+    type: "cross_encoder"  # Options: cross_encoder, semantic, hybrid
+    model_name: "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    batch_size: 32
+    max_length: 512
+  
+  # Caching Configuration
+  caching:
+    enabled: true
+    type: "redis"  # Options: redis, memory
+    redis:
+      host: "localhost"
+      port: 6379
+      db: 0
+      password: null
+      default_ttl: 3600
+      key_prefix: "rag:"
+    memory:
+      max_size: 1000
+      default_ttl: 3600
+    response_cache:
+      default_ttl: 3600
+      enable_query_normalization: true
+  
+  # A/B Testing
+  ab_testing:
+    enabled: true
+    storage_path: "store/experiments"
+    default_traffic_split: 50  # Percentage for new experiments
+  
+  # Real-time Learning
+  learning:
+    enabled: true
+    storage_path: "store/learning"
+    feedback_storage_path: "store/feedback"
+    learning_interval_hours: 1
+    min_feedback_for_update: 5
+    learning_rate: 0.1
+    adaptive_weights_storage: "store/adaptive_weights"
+  
+  # Multi-language Support
+  multilingual:
+    enabled: true
+    auto_translate: true
+    target_language: "en"
+    translation_service: "google"  # Options: google
+    language_detection: true
+    locales_path: "locales"
+    multilingual_embedder: "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+  
+  # Analytics
+  analytics:
+    enabled: true
+    dashboard_port: 8050
+    logs_path: "logs"
+    storage_path: "store"
+    update_interval_minutes: 5
+
+# Feature Flags
+features:
+  multi_turn_conversations: true
+  advanced_reranking: true
+  redis_caching: true
+  ab_testing: true
+  real_time_learning: true
+  multi_language_support: true
+  analytics_dashboard: true
+  context_aware_prompts: true
+  adaptive_retrieval: true
+  feedback_collection: true

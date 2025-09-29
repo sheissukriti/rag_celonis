@@ -1,0 +1,52 @@
+{
+  "experiment_id": "06234d26-5718-4f61-aa3d-5194751f9173",
+  "name": "Retriever Strategy Comparison",
+  "description": "Compare BM25 vs FAISS+TF-IDF retrieval strategies",
+  "variants": [
+    {
+      "variant_id": "5639de47-4ded-4943-8292-b12623efca33",
+      "name": "BM25 Control",
+      "description": "Traditional BM25 retrieval",
+      "config": {
+        "retriever": "bm25",
+        "top_k": 10,
+        "use_reranker": false
+      },
+      "traffic_percentage": 50.0,
+      "is_control": true
+    },
+    {
+      "variant_id": "379d71e9-e1d3-4406-a6f3-fc6fccaa8bd0",
+      "name": "FAISS+TF-IDF",
+      "description": "Dense retrieval with TF-IDF reranking",
+      "config": {
+        "retriever": "faiss_tfidf",
+        "top_k": 10,
+        "use_reranker": true
+      },
+      "traffic_percentage": 50.0,
+      "is_control": false
+    }
+  ],
+  "metrics": [
+    {
+      "name": "response_time",
+      "description": "Response time in seconds",
+      "metric_type": "timer",
+      "higher_is_better": false
+    },
+    {
+      "name": "relevance_score",
+      "description": "Average relevance score of retrieved documents",
+      "metric_type": "gauge",
+      "higher_is_better": true
+    }
+  ],
+  "status": "ExperimentStatus.DRAFT",
+  "start_date": null,
+  "end_date": null,
+  "created_at": "2025-09-29T15:45:13.469004",
+  "updated_at": "2025-09-29T15:45:13.469021",
+  "created_by": "system",
+  "metadata": {}
+}

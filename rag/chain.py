@@ -11,6 +11,8 @@ class ContextDoc:
     id: int
     score: float
     text: str
+    adaptive_weight: float = 1.0
+    rerank_score: Optional[float] = None
 
 class PromptBuilder:
     """Enhanced prompt builder with multiple templates and strategies."""

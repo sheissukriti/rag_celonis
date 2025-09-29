@@ -1,261 +1,479 @@
 """
-Caching layer for RAG system to improve performance.
-Implements both in-memory and persistent caching strategies.
+Enhanced caching layer with Redis support for response caching and session management.
 """
 
-import hashlib
 import json
-import time
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+import hashlib
 import logging
-from functools import wraps
+from typing import Any, Dict, List, Optional, Union
+from datetime import datetime, timedelta
+from dataclasses import dataclass, asdict
+import pickle
+import time
+
+# Optional Redis import with fallback
+try:
+    import redis
+    from redis.exceptions import ConnectionError, TimeoutError
+    REDIS_AVAILABLE = True
+except ImportError:
+    REDIS_AVAILABLE = False
+    redis = None
+    ConnectionError = Exception
+    TimeoutError = Exception
 
 logger = logging.getLogger(__name__)
 
-class SimpleCache:
-    """Simple in-memory cache with TTL support."""
+@dataclass
+class CacheEntry:
+    """Represents a cache entry with metadata."""
+    key: str
+    data: Any
+    created_at: datetime
+    expires_at: Optional[datetime]
+    access_count: int = 0
+    last_accessed: Optional[datetime] = None
+    metadata: Dict[str, Any] = None
+
+class MemoryCache:
+    """In-memory cache implementation as fallback."""
     
     def __init__(self, max_size: int = 1000, default_ttl: int = 3600):
-        """
-        Initialize cache.
-        
-        Args:
-            max_size: Maximum number of items to store
-            default_ttl: Default time-to-live in seconds
-        """
-        self.cache: Dict[str, Dict[str, Any]] = {}
+        self.cache: Dict[str, CacheEntry] = {}
         self.max_size = max_size
         self.default_ttl = default_ttl
-        
-    def _generate_key(self, *args, **kwargs) -> str:
-        """Generate cache key from arguments."""
-        key_data = json.dumps([args, sorted(kwargs.items())], sort_keys=True)
-        return hashlib.md5(key_data.encode()).hexdigest()
+        logger.info("Initialized MemoryCache")
     
     def get(self, key: str) -> Optional[Any]:
-        """Get item from cache if it exists and hasn't expired."""
+        """Get item from cache."""
         if key not in self.cache:
             return None
         
-        item = self.cache[key]
-        if time.time() > item['expires_at']:
+        entry = self.cache[key]
+        
+        # Check expiration
+        if entry.expires_at and datetime.now() > entry.expires_at:
             del self.cache[key]
             return None
         
-        item['last_accessed'] = time.time()
-        return item['value']
-    
-    def set(self, key: str, value: Any, ttl: Optional[int] = None) -> None:
-        """Set item in cache with TTL."""
-        # Evict oldest items if cache is full
-        if len(self.cache) >= self.max_size:
-            self._evict_oldest()
+        # Update access metadata
+        entry.access_count += 1
+        entry.last_accessed = datetime.now()
         
-        ttl = ttl or self.default_ttl
-        self.cache[key] = {
-            'value': value,
-            'created_at': time.time(),
-            'last_accessed': time.time(),
-            'expires_at': time.time() + ttl
+        return entry.data
+    
+    def set(self, key: str, value: Any, ttl: Optional[int] = None) -> bool:
+        """Set item in cache."""
+        try:
+            # Clean up if at max capacity
+            if len(self.cache) >= self.max_size:
+                self._evict_lru()
+            
+            ttl = ttl or self.default_ttl
+            expires_at = datetime.now() + timedelta(seconds=ttl) if ttl > 0 else None
+            
+            entry = CacheEntry(
+                key=key,
+                data=value,
+                created_at=datetime.now(),
+                expires_at=expires_at,
+                metadata={}
+            )
+            
+            self.cache[key] = entry
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error setting cache key {key}: {e}")
+            return False
+    
+    def delete(self, key: str) -> bool:
+        """Delete item from cache."""
+        if key in self.cache:
+            del self.cache[key]
+            return True
+        return False
+    
+    def clear(self) -> bool:
+        """Clear all cache entries."""
+        self.cache.clear()
+        return True
+    
+    def exists(self, key: str) -> bool:
+        """Check if key exists in cache."""
+        if key not in self.cache:
+            return False
+        
+        entry = self.cache[key]
+        if entry.expires_at and datetime.now() > entry.expires_at:
+            del self.cache[key]
+            return False
+        
+        return True
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Get cache statistics."""
+        total_entries = len(self.cache)
+        expired_entries = 0
+        total_accesses = 0
+        
+        for entry in self.cache.values():
+            if entry.expires_at and datetime.now() > entry.expires_at:
+                expired_entries += 1
+            total_accesses += entry.access_count
+        
+        return {
+            'type': 'memory',
+            'total_entries': total_entries,
+            'expired_entries': expired_entries,
+            'total_accesses': total_accesses,
+            'max_size': self.max_size
         }
     
-    def _evict_oldest(self):
-        """Evict the least recently used item."""
+    def _evict_lru(self):
+        """Evict least recently used item."""
         if not self.cache:
             return
         
-        oldest_key = min(self.cache.keys(), 
-                        key=lambda k: self.cache[k]['last_accessed'])
-        del self.cache[oldest_key]
-    
-    def clear(self):
-        """Clear all cached items."""
-        self.cache.clear()
-    
-    def stats(self) -> Dict[str, Any]:
-        """Get cache statistics."""
-        now = time.time()
-        active_items = sum(1 for item in self.cache.values() 
-                          if item['expires_at'] > now)
+        # Find LRU entry
+        lru_key = min(
+            self.cache.keys(),
+            key=lambda k: self.cache[k].last_accessed or self.cache[k].created_at
+        )
         
-        return {
-            'total_items': len(self.cache),
-            'active_items': active_items,
-            'max_size': self.max_size,
-            'cache_usage': len(self.cache) / self.max_size
-        }
+        del self.cache[lru_key]
+        logger.debug(f"Evicted LRU cache entry: {lru_key}")
 
-class PersistentCache:
-    """Persistent cache using JSON files."""
+class RedisCache:
+    """Redis-based cache implementation."""
     
-    def __init__(self, cache_dir: str = "cache", default_ttl: int = 86400):
+    def __init__(self, host: str = 'localhost', port: int = 6379, 
+                 db: int = 0, password: Optional[str] = None,
+                 default_ttl: int = 3600, key_prefix: str = 'rag:'):
         """
-        Initialize persistent cache.
+        Initialize Redis cache.
         
         Args:
-            cache_dir: Directory to store cache files
-            default_ttl: Default time-to-live in seconds
+            host: Redis host
+            port: Redis port
+            db: Redis database number
+            password: Redis password
+            default_ttl: Default TTL in seconds
+            key_prefix: Prefix for all cache keys
         """
-        self.cache_dir = Path(cache_dir)
-        self.cache_dir.mkdir(exist_ok=True)
         self.default_ttl = default_ttl
+        self.key_prefix = key_prefix
+        self.client = None
+        self.connected = False
+        
+        if not REDIS_AVAILABLE:
+            logger.warning("Redis not available. Install redis-py.")
+            return
+        
+        try:
+            self.client = redis.Redis(
+                host=host, port=port, db=db, password=password,
+                decode_responses=False, socket_connect_timeout=5
+            )
+            
+            # Test connection
+            self.client.ping()
+            self.connected = True
+            logger.info(f"Connected to Redis at {host}:{port}")
+            
+        except Exception as e:
+            logger.error(f"Failed to connect to Redis: {e}")
+            self.client = None
+            self.connected = False
     
-    def _get_file_path(self, key: str) -> Path:
-        """Get file path for cache key."""
-        return self.cache_dir / f"{key}.json"
+    def _make_key(self, key: str) -> str:
+        """Add prefix to key."""
+        return f"{self.key_prefix}{key}"
     
     def get(self, key: str) -> Optional[Any]:
-        """Get item from persistent cache."""
-        file_path = self._get_file_path(key)
-        
-        if not file_path.exists():
+        """Get item from Redis cache."""
+        if not self.connected:
             return None
         
         try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
+            full_key = self._make_key(key)
+            data = self.client.get(full_key)
             
-            if time.time() > data['expires_at']:
-                file_path.unlink()  # Delete expired file
+            if data is None:
                 return None
             
-            return data['value']
+            # Deserialize data
+            return pickle.loads(data)
             
-        except (json.JSONDecodeError, KeyError, OSError):
-            # Remove corrupted cache file
-            if file_path.exists():
-                file_path.unlink()
+        except Exception as e:
+            logger.error(f"Error getting cache key {key}: {e}")
             return None
     
-    def set(self, key: str, value: Any, ttl: Optional[int] = None) -> None:
-        """Set item in persistent cache."""
-        file_path = self._get_file_path(key)
-        ttl = ttl or self.default_ttl
-        
-        data = {
-            'value': value,
-            'created_at': time.time(),
-            'expires_at': time.time() + ttl
-        }
+    def set(self, key: str, value: Any, ttl: Optional[int] = None) -> bool:
+        """Set item in Redis cache."""
+        if not self.connected:
+            return False
         
         try:
-            with open(file_path, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-        except OSError as e:
-            logger.error(f"Failed to write cache file {file_path}: {e}")
+            full_key = self._make_key(key)
+            ttl = ttl or self.default_ttl
+            
+            # Serialize data
+            data = pickle.dumps(value)
+            
+            # Set with TTL
+            if ttl > 0:
+                result = self.client.setex(full_key, ttl, data)
+            else:
+                result = self.client.set(full_key, data)
+            
+            return bool(result)
+            
+        except Exception as e:
+            logger.error(f"Error setting cache key {key}: {e}")
+            return False
     
-    def clear(self):
-        """Clear all cached files."""
-        for file_path in self.cache_dir.glob("*.json"):
-            file_path.unlink()
-
-# Global cache instances
-_memory_cache = SimpleCache(max_size=500, default_ttl=1800)  # 30 minutes
-_persistent_cache = PersistentCache(cache_dir="cache", default_ttl=86400)  # 24 hours
-
-def cached_retrieval(cache_type: str = "memory", ttl: int = 1800):
-    """
-    Decorator for caching retrieval results.
-    
-    Args:
-        cache_type: "memory" or "persistent"
-        ttl: Time-to-live in seconds
-    """
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            # Generate cache key
-            cache_key = _memory_cache._generate_key(func.__name__, *args, **kwargs)
-            
-            # Select cache
-            cache = _memory_cache if cache_type == "memory" else _persistent_cache
-            
-            # Try to get from cache
-            cached_result = cache.get(cache_key)
-            if cached_result is not None:
-                logger.debug(f"Cache hit for {func.__name__}")
-                return cached_result
-            
-            # Execute function and cache result
-            result = func(*args, **kwargs)
-            cache.set(cache_key, result, ttl)
-            logger.debug(f"Cache miss for {func.__name__}, result cached")
-            
-            return result
+    def delete(self, key: str) -> bool:
+        """Delete item from Redis cache."""
+        if not self.connected:
+            return False
         
-        return wrapper
-    return decorator
-
-def cached_embedding(cache_type: str = "persistent", ttl: int = 604800):  # 1 week
-    """
-    Decorator for caching embedding computations.
+        try:
+            full_key = self._make_key(key)
+            result = self.client.delete(full_key)
+            return result > 0
+            
+        except Exception as e:
+            logger.error(f"Error deleting cache key {key}: {e}")
+            return False
     
-    Args:
-        cache_type: "memory" or "persistent"
-        ttl: Time-to-live in seconds
-    """
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            # Generate cache key based on input text and model
-            text_input = str(args) + str(kwargs)
-            cache_key = hashlib.md5(text_input.encode()).hexdigest()
-            
-            # Select cache
-            cache = _memory_cache if cache_type == "memory" else _persistent_cache
-            
-            # Try to get from cache
-            cached_result = cache.get(cache_key)
-            if cached_result is not None:
-                logger.debug(f"Embedding cache hit")
-                return cached_result
-            
-            # Execute function and cache result
-            result = func(*args, **kwargs)
-            cache.set(cache_key, result, ttl)
-            logger.debug(f"Embedding cache miss, result cached")
-            
-            return result
+    def clear(self) -> bool:
+        """Clear all cache entries with the prefix."""
+        if not self.connected:
+            return False
         
-        return wrapper
-    return decorator
+        try:
+            pattern = f"{self.key_prefix}*"
+            keys = self.client.keys(pattern)
+            
+            if keys:
+                result = self.client.delete(*keys)
+                return result > 0
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error clearing cache: {e}")
+            return False
+    
+    def exists(self, key: str) -> bool:
+        """Check if key exists in Redis cache."""
+        if not self.connected:
+            return False
+        
+        try:
+            full_key = self._make_key(key)
+            return bool(self.client.exists(full_key))
+            
+        except Exception as e:
+            logger.error(f"Error checking cache key {key}: {e}")
+            return False
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Get Redis cache statistics."""
+        if not self.connected:
+            return {'type': 'redis', 'connected': False}
+        
+        try:
+            info = self.client.info()
+            pattern = f"{self.key_prefix}*"
+            keys_count = len(self.client.keys(pattern))
+            
+            return {
+                'type': 'redis',
+                'connected': True,
+                'total_entries': keys_count,
+                'used_memory': info.get('used_memory_human', 'unknown'),
+                'connected_clients': info.get('connected_clients', 0),
+                'hits': info.get('keyspace_hits', 0),
+                'misses': info.get('keyspace_misses', 0)
+            }
+            
+        except Exception as e:
+            logger.error(f"Error getting cache stats: {e}")
+            return {'type': 'redis', 'connected': False, 'error': str(e)}
 
-def get_cache_stats() -> Dict[str, Any]:
-    """Get statistics for all caches."""
-    return {
-        "memory_cache": _memory_cache.stats(),
-        "persistent_cache": {
-            "cache_dir": str(_persistent_cache.cache_dir),
-            "cache_files": len(list(_persistent_cache.cache_dir.glob("*.json")))
+class CacheManager:
+    """Unified cache manager with fallback support."""
+    
+    def __init__(self, cache_config: Dict[str, Any]):
+        """
+        Initialize cache manager.
+        
+        Args:
+            cache_config: Cache configuration dictionary
+        """
+        self.config = cache_config
+        self.cache = None
+        
+        # Try to initialize Redis cache first
+        if cache_config.get('type') == 'redis' and REDIS_AVAILABLE:
+            redis_config = cache_config.get('redis', {})
+            self.cache = RedisCache(**redis_config)
+            
+            # Fallback to memory cache if Redis fails
+            if not self.cache.connected:
+                logger.warning("Redis connection failed, falling back to memory cache")
+                self.cache = MemoryCache(**cache_config.get('memory', {}))
+        else:
+            # Use memory cache
+            self.cache = MemoryCache(**cache_config.get('memory', {}))
+        
+        logger.info(f"Initialized CacheManager with {type(self.cache).__name__}")
+    
+    def get(self, key: str) -> Optional[Any]:
+        """Get item from cache."""
+        return self.cache.get(key)
+    
+    def set(self, key: str, value: Any, ttl: Optional[int] = None) -> bool:
+        """Set item in cache."""
+        return self.cache.set(key, value, ttl)
+    
+    def delete(self, key: str) -> bool:
+        """Delete item from cache."""
+        return self.cache.delete(key)
+    
+    def clear(self) -> bool:
+        """Clear all cache entries."""
+        return self.cache.clear()
+    
+    def exists(self, key: str) -> bool:
+        """Check if key exists in cache."""
+        return self.cache.exists(key)
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Get cache statistics."""
+        return self.cache.get_stats()
+
+class ResponseCache:
+    """Specialized cache for RAG responses."""
+    
+    def __init__(self, cache_manager: CacheManager, 
+                 default_ttl: int = 3600, enable_query_normalization: bool = True):
+        """
+        Initialize response cache.
+        
+        Args:
+            cache_manager: Cache manager instance
+            default_ttl: Default TTL for cached responses
+            enable_query_normalization: Whether to normalize queries for caching
+        """
+        self.cache_manager = cache_manager
+        self.default_ttl = default_ttl
+        self.enable_query_normalization = enable_query_normalization
+        
+        logger.info("Initialized ResponseCache")
+    
+    def _normalize_query(self, query: str) -> str:
+        """Normalize query for consistent caching."""
+        if not self.enable_query_normalization:
+            return query
+        
+        # Basic normalization: lowercase, strip whitespace, remove extra spaces
+        normalized = ' '.join(query.lower().strip().split())
+        return normalized
+    
+    def _generate_cache_key(self, query: str, retrieval_params: Dict[str, Any]) -> str:
+        """Generate cache key for query and parameters."""
+        normalized_query = self._normalize_query(query)
+        
+        # Create a consistent string representation of parameters
+        param_str = json.dumps(retrieval_params, sort_keys=True)
+        
+        # Generate hash
+        cache_input = f"{normalized_query}|{param_str}"
+        cache_key = hashlib.md5(cache_input.encode('utf-8')).hexdigest()
+        
+        return f"response:{cache_key}"
+    
+    def get_response(self, query: str, retrieval_params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Get cached response for query."""
+        cache_key = self._generate_cache_key(query, retrieval_params)
+        
+        cached_response = self.cache_manager.get(cache_key)
+        if cached_response:
+            logger.info(f"Cache hit for query: {query[:50]}...")
+            
+            # Update access metadata
+            cached_response['cache_metadata'] = {
+                'cache_hit': True,
+                'accessed_at': datetime.now().isoformat(),
+                'original_query': query
+            }
+            
+            return cached_response
+        
+        logger.debug(f"Cache miss for query: {query[:50]}...")
+        return None
+    
+    def cache_response(self, query: str, retrieval_params: Dict[str, Any], 
+                      response: Dict[str, Any], ttl: Optional[int] = None) -> bool:
+        """Cache response for query."""
+        cache_key = self._generate_cache_key(query, retrieval_params)
+        ttl = ttl or self.default_ttl
+        
+        # Add cache metadata
+        cached_response = response.copy()
+        cached_response['cache_metadata'] = {
+            'cached_at': datetime.now().isoformat(),
+            'ttl': ttl,
+            'original_query': query,
+            'cache_key': cache_key
+        }
+        
+        success = self.cache_manager.set(cache_key, cached_response, ttl)
+        
+        if success:
+            logger.info(f"Cached response for query: {query[:50]}...")
+        else:
+            logger.warning(f"Failed to cache response for query: {query[:50]}...")
+        
+        return success
+    
+    def invalidate_query(self, query: str, retrieval_params: Dict[str, Any]) -> bool:
+        """Invalidate cached response for specific query."""
+        cache_key = self._generate_cache_key(query, retrieval_params)
+        return self.cache_manager.delete(cache_key)
+    
+    def get_cache_stats(self) -> Dict[str, Any]:
+        """Get response cache statistics."""
+        base_stats = self.cache_manager.get_stats()
+        base_stats['default_ttl'] = self.default_ttl
+        base_stats['query_normalization'] = self.enable_query_normalization
+        
+        return base_stats
+
+# Default cache configurations
+DEFAULT_CACHE_CONFIGS = {
+    'redis': {
+        'type': 'redis',
+        'redis': {
+            'host': 'localhost',
+            'port': 6379,
+            'db': 0,
+            'default_ttl': 3600,
+            'key_prefix': 'rag:'
+        },
+        'memory': {  # Fallback config
+            'max_size': 1000,
+            'default_ttl': 3600
+        }
+    },
+    'memory': {
+        'type': 'memory',
+        'memory': {
+            'max_size': 1000,
+            'default_ttl': 3600
         }
     }
-
-def clear_all_caches():
-    """Clear all caches."""
-    _memory_cache.clear()
-    _persistent_cache.clear()
-    logger.info("All caches cleared")
-
-# Example usage with existing retrievers
-class CachedBM25Retriever:
-    """BM25 retriever with caching."""
-    
-    def __init__(self, base_retriever):
-        self.base_retriever = base_retriever
-    
-    @cached_retrieval(cache_type="memory", ttl=1800)
-    def search(self, query: str, top_k: int = 10) -> List[Dict]:
-        """Cached search method."""
-        return self.base_retriever.search(query, top_k)
-
-class CachedFaissTfidfRetriever:
-    """FAISS TF-IDF retriever with caching."""
-    
-    def __init__(self, base_retriever):
-        self.base_retriever = base_retriever
-    
-    @cached_retrieval(cache_type="memory", ttl=1800)
-    def search(self, query: str, top_k: int = 10) -> List[Dict]:
-        """Cached search method."""
-        return self.base_retriever.search(query, top_k)
+}
