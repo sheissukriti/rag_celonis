@@ -525,7 +525,7 @@ class DashboardApp:
     
     def run(self, debug: bool = False):
         """Run the dashboard."""
-        self.app.run_server(debug=debug, port=self.port, host='0.0.0.0')
+        self.app.run(debug=debug, port=self.port, host='0.0.0.0')
 
 def create_analytics_dashboard(logs_path: str = "logs", storage_path: str = "store", port: int = 8050):
     """Create and return analytics dashboard."""
