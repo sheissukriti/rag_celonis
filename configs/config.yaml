@@ -1,0 +1,12 @@
+
+app:
+  model: mistral
+  embedding_model: sentence-transformers/all-MiniLM-L6-v2
+  top_k: 10
+  top_k_context: 5
+  use_reranker: false
+  use_reranker: true
+  index_path: store/faiss.index
+  input_texts_path: store/input_texts.jsonl
+  qa_texts_path: store/qa_texts_10k.jsonl
+  retriever: faiss_tfidf

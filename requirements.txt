@@ -1,0 +1,16 @@
+datasets
+sentence-transformers
+faiss-cpu
+fastapi
+uvicorn
+transformers
+rank_bm25
+pydantic
+python-dotenv
+requests
+PyYAML
+scikit-learn
+joblib
+streamlit
+httpx
+torch
