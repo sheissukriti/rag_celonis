@@ -13,18 +13,3 @@ __pycache__/
 .mypy_cache/
 .pytest_cache/
 
-# Project logs
-logs/
-
-# Data artifacts
-/data/preprocessed_data.json
-
-# FAISS and model artifacts
-/store/faiss.*
-/store/*.pkl
-/store/*.npy
-/store/*.index
-/store/*.ids
-
-# Allow smaller JSONL files
-!/store/*.jsonl
